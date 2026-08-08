@@ -1,0 +1,11 @@
+build/
+.pio/
+.vscode/
+
+# Restored by `idf.py reconfigure` or `pio run` from main/idf_component.yml.
+managed_components/
+
+sdkconfig
+sdkconfig.*
+!sdkconfig.defaults
+!sdkconfig.defaults.*

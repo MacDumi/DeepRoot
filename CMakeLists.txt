@@ -26,20 +26,3 @@ project(matter_soil_sensor)
 # ---------------------------------------------------------------------------
 idf_component_get_property(matter_lib espressif__esp_matter COMPONENT_LIB)
 target_compile_options(${matter_lib} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>)
-
-# ---------------------------------------------------------------------------
-# Software version lives in sdkconfig.defaults, NOT here.
-#
-# Do not try to set it with -DCHIP_DEVICE_CONFIG_DEVICE_SOFTWARE_VERSION.
-# Those macros are only read by GenericConfigurationManagerImpl, and ESP32
-# overrides both getters in src/platform/ESP32/ConfigurationManagerImpl.cpp:
-#
-#   GetSoftwareVersion()       -> CHIP_CONFIG_SOFTWARE_VERSION_NUMBER
-#                                 (a different macro, injected as a -D by
-#                                  esp_matter's own CMakeLists)
-#   GetSoftwareVersionString() -> esp_app_get_description()->version
-#                                 (the ESP-IDF project version)
-#
-# So defining the CHIP_DEVICE_CONFIG_* pair compiles cleanly and does nothing.
-# See sdkconfig.defaults for the three options that actually drive this.
-# ---------------------------------------------------------------------------
