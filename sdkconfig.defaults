@@ -1,0 +1,32 @@
+# ---- Target / flash -------------------------------------------------------
+CONFIG_IDF_TARGET="esp32c6"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ---- Matter transport -----------------------------------------------------
+# Wi-Fi + BLE commissioning. Measured at 1,649,152 B, fits the 1.94 MB
+# dual-OTA slot with ~19% headroom. For Thread instead of Wi-Fi see README.
+CONFIG_ENABLE_CHIPOBLE=y
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+
+# ---- Device identity ------------------------------------------------------
+CONFIG_CUSTOM_DEVICE_INSTANCE_INFO_PROVIDER=y
+
+CONFIG_ENABLE_OTA_REQUESTOR=y
+
+# ---- Software version ----------------------------------------------------
+CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
+CONFIG_APP_PROJECT_VER="0.3"
+CONFIG_DEVICE_SOFTWARE_VERSION_NUMBER=3
+
+# ---- Matter crypto --------------------------------------------------------
+CONFIG_MBEDTLS_HKDF_C=y
+CONFIG_MBEDTLS_CMAC_C=y
+CONFIG_MBEDTLS_SSL_PROTO_DTLS=y
+CONFIG_MBEDTLS_ECJPAKE_C=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_ECJPAKE=y
+
+# ---- Size -----------------------------------------------------------------
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
