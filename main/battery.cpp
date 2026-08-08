@@ -3,13 +3,14 @@
 #include <esp_adc/adc_cali.h>
 #include <esp_adc/adc_cali_scheme.h>
 #include <esp_log.h>
+#include <esp_rom_sys.h>
 
 namespace battery {
 
 static const char *TAG = "battery";
 
 static constexpr adc_channel_t kBatteryChannel = ADC_CHANNEL_0;  // A0_D0
-static constexpr adc_atten_t kAttenuation = ADC_ATTEN_DB_12;     // ~0-3.1 V
+static constexpr adc_atten_t kAttenuation = ADC_ATTEN_DB_6;      // ~0-2.2 V
 
 /* Plausibility window per cell, in millivolts.
  *
@@ -43,6 +44,9 @@ static constexpr CurvePoint kCurve[] = {
 };
 
 static constexpr size_t kCurvePoints = sizeof(kCurve) / sizeof(kCurve[0]);
+static constexpr int kOversampleCount = 10;
+
+static constexpr uint32_t kSampleIntervalUs = 200;
 
 static adc_oneshot_unit_handle_t s_adc = nullptr;
 static adc_cali_handle_t s_cali = nullptr;
@@ -109,18 +113,29 @@ esp_err_t read_millivolts(int *out_mv)
         return ESP_ERR_NOT_SUPPORTED;
     }
 
-    int raw = 0;
-    esp_err_t err = adc_oneshot_read(s_adc, kBatteryChannel, &raw);
-    if (err != ESP_OK) {
-        return err;
+    uint32_t sum = 0;
+    for (int i = 0; i < kOversampleCount; ++i) {
+        if (i > 0) {
+            esp_rom_delay_us(kSampleIntervalUs);
+        }
+
+        int raw = 0;
+        esp_err_t err = adc_oneshot_read(s_adc, kBatteryChannel, &raw);
+        /* A short burst is a different measurement, not a noisier one — fail
+         * the reading rather than average whatever arrived. */
+        if (err != ESP_OK) {
+            return err;
+        }
+        sum += static_cast<uint32_t>(raw);
     }
 
-    err = adc_cali_raw_to_voltage(s_cali, raw, out_mv);
-    if (err != ESP_OK) {
-        return err;
-    }
+    /* +N/2 rounds to nearest; truncating would bias every reading low by up
+     * to one count, and a systematic offset is exactly what averaging cannot
+     * remove. On this curve a low bias reads as a flatter battery. */
+    const int raw_mean =
+        static_cast<int>((sum + kOversampleCount / 2) / kOversampleCount);
 
-    return ESP_OK;
+    return adc_cali_raw_to_voltage(s_cali, raw_mean, out_mv);
 }
 
 nullable<uint8_t> read_percent(void)
