@@ -5,6 +5,13 @@
 #include <esp_log.h>
 #include <esp_matter.h>
 
+#include <app/AttributeAccessInterface.h>
+#include <app/AttributeAccessInterfaceRegistry.h>
+#include <clusters/SoilMeasurement/Attributes.h>
+#include <clusters/SoilMeasurement/Metadata.h>
+
+#include "app_config.h"
+
 using namespace esp_matter;
 using namespace esp_matter::cluster;
 
@@ -12,7 +19,69 @@ namespace soil_sensor {
 
 static const char *TAG = "soil_endpoint";
 
-esp_err_t create(node_t *node, uint16_t *endpoint_id)
+namespace PowerSourceNs = chip::app::Clusters::PowerSource;
+namespace SoilNs = chip::app::Clusters::SoilMeasurement;
+namespace GlobalsNs = chip::app::Clusters::Globals;
+
+/* ---- SoilMoistureMeasurementLimits -------------------------------------- */
+static const GlobalsNs::Structs::MeasurementAccuracyRangeStruct::Type kMoistureAccuracyRanges[] = {
+    {
+        .rangeMin = 0,
+        .rangeMax = 100,
+        .fixedMax = chip::MakeOptional(app_config::probe::kAccuracyFixedMaxPercent),
+    },
+};
+
+static const SoilNs::Attributes::SoilMoistureMeasurementLimits::TypeInfo::Type kMoistureLimits = {
+    .measurementType = GlobalsNs::MeasurementTypeEnum::kSoilMoisture,
+    .measured = true,
+    .minMeasuredValue = 0,
+    .maxMeasuredValue = 100,
+    .accuracyRanges = chip::app::DataModel::List<
+        const GlobalsNs::Structs::MeasurementAccuracyRangeStruct::Type>(kMoistureAccuracyRanges),
+};
+
+class limits_access_t : public chip::app::AttributeAccessInterface {
+public:
+    /* Any endpoint: this device has one soil endpoint, and its id is not known
+     * until endpoint::create() has run. */
+    limits_access_t() : AttributeAccessInterface(chip::NullOptional, SoilNs::Id) {}
+
+    CHIP_ERROR Read(const chip::app::ConcreteReadAttributePath &path,
+                    chip::app::AttributeValueEncoder &encoder) override
+    {
+        if (path.mAttributeId != SoilNs::Attributes::SoilMoistureMeasurementLimits::Id) {
+            return CHIP_NO_ERROR;  // not encoded: served from the attribute store
+        }
+        return encoder.Encode(kMoistureLimits);
+    }
+};
+
+static limits_access_t s_limits_access;
+
+/* BatPercentRemaining is in HALF-PERCENT units: 0-200 */
+static nullable<uint8_t> to_half_percent(nullable<uint8_t> percent)
+{
+    if (percent.is_null()) {
+        return percent;
+    }
+    const uint8_t p = percent.value() > 100 ? 100 : percent.value();
+    return nullable<uint8_t>(static_cast<uint8_t>(p * 2));
+}
+
+PowerSourceNs::BatChargeLevelEnum charge_level(uint8_t percent)
+{
+    if (percent <= app_config::battery::kBatteryCriticalPercent) {
+        return PowerSourceNs::BatChargeLevelEnum::kCritical;
+    }
+    if (percent <= app_config::battery::kBatteryWarningPercent) {
+        return PowerSourceNs::BatChargeLevelEnum::kWarning;
+    }
+    return PowerSourceNs::BatChargeLevelEnum::kOk;
+}
+
+esp_err_t create(node_t *node, nullable<uint8_t> moisture, nullable<uint8_t> battery,
+                 uint16_t *endpoint_id)
 {
     if (node == nullptr || endpoint_id == nullptr) {
         return ESP_ERR_INVALID_ARG;
@@ -39,7 +108,7 @@ esp_err_t create(node_t *node, uint16_t *endpoint_id)
         return ESP_FAIL;
     }
 
-    /* SoilMeasurement — no esp_matter helper exists, so build it by id. */
+    /* SoilMeasurement -- no esp_matter helper exists, so build it by id. */
     cluster_t *soil = cluster::create(endpoint, kSoilMeasurementClusterId,
                                       CLUSTER_FLAG_SERVER);
     if (soil == nullptr) {
@@ -47,22 +116,30 @@ esp_err_t create(node_t *node, uint16_t *endpoint_id)
         return ESP_FAIL;
     }
 
-    /* SoilMoistureMeasuredValue: nullable percent (0-100).
-     * Starts null — we have not read the probe yet, and reporting 0%
-     * before the first measurement would be a lie a controller may act on. */
-    nullable<uint8_t> unknown;
-    attribute::create(soil, kSoilMoistureMeasuredValueAttributeId,
-                      ATTRIBUTE_FLAG_NULLABLE, esp_matter_nullable_uint8(unknown));
+    /* A bare cluster::create() adds no global attributes, and both are
+     * mandatory on every cluster. No SoilMeasurement features exist. */
+    global::attribute::create_cluster_revision(soil, SoilNs::kRevision);
+    global::attribute::create_feature_map(soil, 0);
 
-    /* TODO: SoilMoistureMeasurementLimits (0x0000) is a MeasurementAccuracy
-     * struct describing the probe's accuracy and measurable range. Maybe not needed here? */
+    /* SoilMoistureMeasurementLimits: listed in the store so it appears in the
+     * AttributeList, but the value always comes from s_limits_access. The
+     * empty array is esp_matter's placeholder for an internally managed attribute. */
+    attribute::create(soil, kSoilMoistureMeasurementLimitsAttributeId,
+                      ATTRIBUTE_FLAG_MANAGED_INTERNALLY, esp_matter_array(nullptr, 0, 0));
+    if (!chip::app::AttributeAccessInterfaceRegistry::Instance().Register(&s_limits_access)) {
+        ESP_LOGE(TAG, "soil measurement limits access already registered");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* SoilMoistureMeasuredValue: nullable percent (0-100), seeded with the
+     * boot reading so the first report after a reboot */
+    attribute::create(soil, kSoilMoistureMeasuredValueAttributeId,
+                      ATTRIBUTE_FLAG_NULLABLE, esp_matter_nullable_uint8(moisture));
 
     /* PowerSource, battery flavour.
      * endpoint::power_source::add() composes the PowerSource device type and
      * its cluster onto an endpoint that already has one.
      */
-    namespace PowerSourceNs = chip::app::Clusters::PowerSource;
-
     endpoint::power_source::config_t power_config;
     power_config.power_source.feature_flags =
         cluster::power_source::feature::battery::get_id();
@@ -76,6 +153,13 @@ esp_err_t create(node_t *node, uint16_t *endpoint_id)
     power_config.power_source.features.battery.bat_replaceability =
         chip::to_underlying(PowerSourceNs::BatReplaceabilityEnum::kUserReplaceable);
 
+    if (!battery.is_null()) {
+        const PowerSourceNs::BatChargeLevelEnum level = charge_level(battery.value());
+        power_config.power_source.features.battery.bat_charge_level = chip::to_underlying(level);
+        power_config.power_source.features.battery.bat_replacement_needed =
+            level == PowerSourceNs::BatChargeLevelEnum::kCritical;
+    }
+
     /* Creates the three attributes the Battery feature makes mandatory:
      * BatChargeLevel, BatReplacementNeeded and BatReplaceability.
      */
@@ -86,7 +170,7 @@ esp_err_t create(node_t *node, uint16_t *endpoint_id)
     }
 
     /* BatPercentRemaining is optional, so the feature helper does not create
-     * it. Starts null as the first measurement has not happened yet.
+     * it. Seeded from the boot reading.
      */
     cluster_t *power = cluster::get(endpoint, kPowerSourceClusterId);
     if (power == nullptr) {
@@ -94,9 +178,8 @@ esp_err_t create(node_t *node, uint16_t *endpoint_id)
         return ESP_FAIL;
     }
 
-    nullable<uint8_t> unknown_percent;
     cluster::power_source::attribute::create_bat_percent_remaining(
-        power, unknown_percent, nullable<uint8_t>(0), nullable<uint8_t>(200));
+        power, to_half_percent(battery), nullable<uint8_t>(0), nullable<uint8_t>(200));
 
     err = endpoint::add_device_type(endpoint, kSoilSensorDeviceTypeId,
                                     kSoilSensorDeviceTypeVersion);
@@ -119,16 +202,7 @@ esp_err_t report_moisture(uint16_t endpoint_id, nullable<uint8_t> percent)
 
 esp_err_t report_battery(uint16_t endpoint_id, nullable<uint8_t> percent)
 {
-    namespace PowerSourceNs = chip::app::Clusters::PowerSource;
-
-    /* BatPercentRemaining is in HALF-PERCENT units: 0-200 */
-    nullable<uint8_t> half_percent;
-    if (!percent.is_null()) {
-        const uint8_t p = percent.value() > 100 ? 100 : percent.value();
-        half_percent = nullable<uint8_t>(static_cast<uint8_t>(p * 2));
-    }
-
-    esp_matter_attr_val_t pct_val = esp_matter_nullable_uint8(half_percent);
+    esp_matter_attr_val_t pct_val = esp_matter_nullable_uint8(to_half_percent(percent));
     esp_err_t err = attribute::update(endpoint_id, kPowerSourceClusterId,
                                       kBatPercentRemainingAttributeId, &pct_val);
 
@@ -139,15 +213,7 @@ esp_err_t report_battery(uint16_t endpoint_id, nullable<uint8_t> percent)
         return err;
     }
 
-    const uint8_t p = percent.value();
-    PowerSourceNs::BatChargeLevelEnum level;
-    if (p <= kBatteryCriticalPercent) {
-        level = PowerSourceNs::BatChargeLevelEnum::kCritical;
-    } else if (p <= kBatteryWarningPercent) {
-        level = PowerSourceNs::BatChargeLevelEnum::kWarning;
-    } else {
-        level = PowerSourceNs::BatChargeLevelEnum::kOk;
-    }
+    const PowerSourceNs::BatChargeLevelEnum level = charge_level(percent.value());
 
     esp_matter_attr_val_t level_val = esp_matter_enum8(chip::to_underlying(level));
     esp_err_t level_err = attribute::update(endpoint_id, kPowerSourceClusterId,

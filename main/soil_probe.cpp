@@ -9,79 +9,65 @@
 #include <esp_log.h>
 #include <esp_rom_sys.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
+#include <nvs.h>
+
+#include "adc_bus.h"
+#include "app_config.h"
+
+#ifdef CONFIG_PM_ENABLE
+#include <esp_pm.h>
+#endif
 
 namespace soil_probe {
 
 static const char *TAG = "soil_probe";
 
-static constexpr adc_unit_t kAdcUnit = ADC_UNIT_1;
-static constexpr adc_channel_t kProbeChannel = ADC_CHANNEL_1;  // A1_D1
-static constexpr adc_atten_t kAttenuation = ADC_ATTEN_DB_12;   // ~0-3.1 V
+using namespace app_config::probe;
 
-/* ---- Probe excitation -----------------------------------------------------
- *
- * The probe is driven by a square wave rather than DC: it measures the
- * capacitance of the soil dielectric, so it needs an AC excitation whose
- * rectified amplitude the ADC then reads. No signal means no reading, so the
- * output is meaningless unless the drive is running.
- *
- * D3 is GPIO21 on the XIAO ESP32-C6 (see the Seeed variant table). It is one
- * of the pins with no ADC channel behind it, so nothing is lost by using it
- * for a digital output.
- *
- * 8-bit resolution is the ceiling here, not a choice. The C6's fastest LEDC
- * source is PLL_F80M, and duty resolution is bounded by
- * log2(src_clk / freq) = log2(80 MHz / 200 kHz) = log2(400) ≈ 8.6, so 9 bits
- * would need a clock divider below 1. That puts the duty step at 1/256, and
- * 68% lands on 174 (67.97%) — the closest representable value. */
-static constexpr gpio_num_t kExcitationPin = GPIO_NUM_21;  // D3
-static constexpr ledc_mode_t kExcitationMode = LEDC_LOW_SPEED_MODE;  // C6 has no high-speed mode
-static constexpr ledc_timer_t kExcitationTimer = LEDC_TIMER_0;
-static constexpr ledc_channel_t kExcitationChannel = LEDC_CHANNEL_0;
-static constexpr uint32_t kExcitationHz = 200000;
-static constexpr ledc_timer_bit_t kExcitationBits = LEDC_TIMER_8_BIT;
-static constexpr uint32_t kExcitationDutyPercent = 68;
+/* ---- Probe excitation ----------------------------------------------------- */
 static constexpr uint32_t kExcitationFullDuty = 1u << static_cast<uint32_t>(kExcitationBits);
 static constexpr uint32_t kExcitationDuty =
     (kExcitationFullDuty * kExcitationDutyPercent + 50) / 100;
 
-/* The drive is gated rather than left running: this samples once a minute on
- * a primary cell, so a permanently oscillating output and a permanently
- * powered probe would dominate the energy budget.
- *
- * That buys a settling delay. The probe's output is a rectified, RC-filtered
- * DC level, and reading before it has settled reports a wet-looking value
- * whatever the soil is doing — a failure that calibrates away invisibly and
- * then reappears in the field.
- *
- * TODO 50 ms is a guess and needs to be verified
- */
-static constexpr TickType_t kExcitationSettle = pdMS_TO_TICKS(50);
+/* Calibration storage. Its own namespace, so a Matter factory reset (which
+ * erases only esp_matter's namespaces) does not throw the calibration away. */
+static constexpr char kNvsNamespace[] = "soil_cal";
+static constexpr char kNvsDryKey[] = "dry_mv";
+static constexpr char kNvsWetKey[] = "wet_mv";
 
-static constexpr int kOversampleCount = 10;
-static constexpr uint32_t kSampleIntervalUs = 200;
+static int s_dry_mv = kDefaultDryMv;
+static int s_wet_mv = kDefaultWetMv;
+static portMUX_TYPE s_cal_lock = portMUX_INITIALIZER_UNLOCKED;
 
-/* Calibration endpoints, in millivolts.
- *
- * Capacitive probes read HIGH when dry and LOW when wet — the mapping is
- * inverted relative to intuition. Obtain these with read_raw_mv():
- *   kDryMv : probe clean, dry, in air
- *   kWetMv : probe submerged in water to its marked depth
- *
- * These are placeholders
- */
-static constexpr int kDryMv = 2600;  // TODO calibrate
-static constexpr int kWetMv = 1100;  // TODO calibrate
-
-/* Readings this far outside the calibrated span are treated as faults
- * rather than clamped, so a disconnected probe reports null instead of
- * a confident 0% or 100%. */
-static constexpr int kPlausibilityMarginMv = 400;
-
-static adc_oneshot_unit_handle_t s_adc = nullptr;
 static adc_cali_handle_t s_cali = nullptr;
 static bool s_cali_enabled = false;
+
+/* Mutex used by both the calibration and measurement tasks */
+static SemaphoreHandle_t s_read_mutex = nullptr;
+
+#ifdef CONFIG_PM_ENABLE
+static esp_pm_lock_handle_t s_pm_lock = nullptr;
+#endif
+
+static void excitation_pm_acquire(void)
+{
+#ifdef CONFIG_PM_ENABLE
+    if (s_pm_lock != nullptr) {
+        esp_pm_lock_acquire(s_pm_lock);
+    }
+#endif
+}
+
+static void excitation_pm_release(void)
+{
+#ifdef CONFIG_PM_ENABLE
+    if (s_pm_lock != nullptr) {
+        esp_pm_lock_release(s_pm_lock);
+    }
+#endif
+}
 
 /* Configures the timer and channel but leaves the output idle low */
 static esp_err_t excitation_init(void)
@@ -94,7 +80,8 @@ static esp_err_t excitation_init(void)
     /* Explicitly PLL_F80M rather than LEDC_AUTO_CLK: auto-selection is free to
      * pick RC_FAST, which is an uncalibrated internal oscillator. A drifting
      * excitation frequency shifts the probe's output and would show up as
-     * slow, unexplained moisture drift. */
+     * slow, unexplained moisture drift. At 40 MHz it is also the only source
+     * fast enough, so a mis-selection fails the config. */
     timer_cfg.clk_cfg = LEDC_USE_PLL_DIV_CLK;
     esp_err_t err = ledc_timer_config(&timer_cfg);
     if (err != ESP_OK) {
@@ -110,6 +97,8 @@ static esp_err_t excitation_init(void)
     chan_cfg.intr_type = LEDC_INTR_DISABLE;
     chan_cfg.duty = 0;
     chan_cfg.hpoint = 0;
+    /* Not the default NO_ALIVE_NO_PD. */
+    chan_cfg.sleep_mode = LEDC_SLEEP_MODE_NO_ALIVE_ALLOW_PD;
     err = ledc_channel_config(&chan_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "excitation channel config failed: %s", esp_err_to_name(err));
@@ -133,18 +122,86 @@ static void excitation_off(void)
     ledc_stop(kExcitationMode, kExcitationChannel, 0);
 }
 
+static bool calibration_valid(int dry_mv, int wet_mv)
+{
+    return dry_mv - wet_mv >= kMinCalibrationSpanMv;
+}
+
+static void calibration_load(void)
+{
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(kNvsNamespace, NVS_READONLY, &nvs);
+    if (err != ESP_OK) {
+        /* NOT_FOUND just means it has never been calibrated. */
+        if (err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "calibration NVS open failed: %s", esp_err_to_name(err));
+        }
+        ESP_LOGW(TAG, "not calibrated; using defaults dry %d mV / wet %d mV",
+                 kDefaultDryMv, kDefaultWetMv);
+        return;
+    }
+
+    int32_t dry = 0, wet = 0;
+    esp_err_t dry_err = nvs_get_i32(nvs, kNvsDryKey, &dry);
+    esp_err_t wet_err = nvs_get_i32(nvs, kNvsWetKey, &wet);
+    nvs_close(nvs);
+
+    if (dry_err != ESP_OK || wet_err != ESP_OK || !calibration_valid(dry, wet)) {
+        ESP_LOGW(TAG, "stored calibration missing or invalid; using defaults");
+        return;
+    }
+
+    s_dry_mv = dry;
+    s_wet_mv = wet;
+    ESP_LOGI(TAG, "calibration loaded: dry %d mV / wet %d mV", s_dry_mv, s_wet_mv);
+}
+
+esp_err_t set_calibration(int dry_mv, int wet_mv)
+{
+    if (!calibration_valid(dry_mv, wet_mv)) {
+        ESP_LOGW(TAG, "rejecting calibration dry %d mV / wet %d mV "
+                      "(dry must exceed wet by %d mV)",
+                 dry_mv, wet_mv, kMinCalibrationSpanMv);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "calibration NVS open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = nvs_set_i32(nvs, kNvsDryKey, dry_mv);
+    if (err == ESP_OK) {
+        err = nvs_set_i32(nvs, kNvsWetKey, wet_mv);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "calibration NVS write failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    taskENTER_CRITICAL(&s_cal_lock);
+    s_dry_mv = dry_mv;
+    s_wet_mv = wet_mv;
+    taskEXIT_CRITICAL(&s_cal_lock);
+
+    ESP_LOGI(TAG, "calibration saved: dry %d mV / wet %d mV", dry_mv, wet_mv);
+    return ESP_OK;
+}
+
 esp_err_t init(void)
 {
-    adc_oneshot_unit_init_cfg_t unit_cfg = {};
-    unit_cfg.unit_id = kAdcUnit;
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&unit_cfg, &s_adc));
+    calibration_load();
 
-    adc_oneshot_chan_cfg_t chan_cfg = {};
-    chan_cfg.atten = kAttenuation;
-    chan_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(s_adc, kProbeChannel, &chan_cfg));
+    s_read_mutex = xSemaphoreCreateMutex();
+    if (s_read_mutex == nullptr) {
+        return ESP_ERR_NO_MEM;
+    }
 
-    /* Curve-fitting calibration is what makes readings comparable between boards. */
     adc_cali_curve_fitting_config_t cali_cfg = {};
     cali_cfg.unit_id = kAdcUnit;
     cali_cfg.chan = kProbeChannel;
@@ -161,53 +218,65 @@ esp_err_t init(void)
         return err;
     }
 
-    ESP_LOGI(TAG, "probe initialised on ADC%d channel %d, %" PRIu32 " Hz / %" PRIu32
-                  "%% excitation on GPIO%d",
-             kAdcUnit + 1, kProbeChannel, kExcitationHz, kExcitationDutyPercent,
-             kExcitationPin);
+#ifdef CONFIG_PM_ENABLE
+    err = esp_pm_lock_create(ESP_PM_APB_FREQ_MAX, 0, "soil_excite", &s_pm_lock);
+    if (err != ESP_OK) {
+        /* Fail loudly rather than silently taking readings through light sleep:
+         * those would look plausible and be wrong. */
+        ESP_LOGE(TAG, "could not create excitation PM lock: %s", esp_err_to_name(err));
+        return err;
+    }
+#endif
+    ESP_LOGI(TAG, "probe initialised on ADC%d channel %d, %" PRIu32
+                  " Hz / 50%% excitation on GPIO%d",
+             kAdcUnit + 1, kProbeChannel, kExcitationHz, kExcitationPin);
     return ESP_OK;
 }
 
-adc_oneshot_unit_handle_t adc_unit(void)
+/* Body of read_raw_mv(); the caller holds s_read_mutex. */
+static esp_err_t read_raw_mv_locked(int *out_mv)
 {
-    return s_adc;
-}
+    esp_err_t err;
+    /* Held across the whole excitation window */
+    excitation_pm_acquire();
 
-esp_err_t read_raw_mv(int *out_mv)
-{
-    if (s_adc == nullptr || out_mv == nullptr) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    esp_err_t err = excitation_on();
+    err = excitation_on();
     if (err != ESP_OK) {
+        excitation_pm_release();
         ESP_LOGE(TAG, "excitation failed to start: %s", esp_err_to_name(err));
         return err;
     }
     vTaskDelay(kExcitationSettle);
 
+    adc_oneshot_unit_handle_t adc = nullptr;
+    err = adc_bus::open(kProbeChannel, kAttenuation, &adc);
+    if (err != ESP_OK) {
+        excitation_off();
+        excitation_pm_release();
+        return err;
+    }
+
     /* Accumulate raw counts and convert once at the end. */
     uint32_t sum = 0;
     for (int i = 0; i < kOversampleCount; ++i) {
-        /* Between samples only — a trailing delay would add nothing but would
+        /* Between samples only -- a trailing delay would add nothing but would
          * push the burst past a full period and unbalance the phases. */
         if (i > 0) {
             esp_rom_delay_us(kSampleIntervalUs);
         }
 
         int raw = 0;
-        err = adc_oneshot_read(s_adc, kProbeChannel, &raw);
+        err = adc_oneshot_read(adc, kProbeChannel, &raw);
         if (err != ESP_OK) {
             break;
         }
         sum += static_cast<uint32_t>(raw);
     }
 
+    adc_bus::close();
     excitation_off();
+    excitation_pm_release();
 
-    /* A failed sample aborts the whole reading rather than averaging what
-     * arrived — a short burst is a different measurement, not a noisier one.
-     */
     if (err != ESP_OK) {
         return err;
     }
@@ -222,6 +291,18 @@ esp_err_t read_raw_mv(int *out_mv)
     return ESP_OK;
 }
 
+esp_err_t read_raw_mv(int *out_mv)
+{
+    if (s_read_mutex == nullptr || out_mv == nullptr) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(s_read_mutex, portMAX_DELAY);
+    esp_err_t err = read_raw_mv_locked(out_mv);
+    xSemaphoreGive(s_read_mutex);
+    return err;
+}
+
 nullable<uint8_t> read_percent(void)
 {
     nullable<uint8_t> unknown;
@@ -232,19 +313,24 @@ nullable<uint8_t> read_percent(void)
         return unknown;
     }
 
-    /* Reject readings outside the plausible span — most often a probe that
+    taskENTER_CRITICAL(&s_cal_lock);
+    const int dry_mv = s_dry_mv;
+    const int wet_mv = s_wet_mv;
+    taskEXIT_CRITICAL(&s_cal_lock);
+
+    /* Reject readings outside the plausible span -- most often a probe that
      * is not connected. Better to report "unknown" than a confident lie. */
-    if (mv > kDryMv + kPlausibilityMarginMv || mv < kWetMv - kPlausibilityMarginMv) {
+    if (mv > dry_mv + kPlausibilityMarginMv || mv < wet_mv - kPlausibilityMarginMv) {
         ESP_LOGW(TAG, "reading %d mV outside calibrated span, reporting null", mv);
         return unknown;
     }
 
-    if (mv > kDryMv) mv = kDryMv;
-    if (mv < kWetMv) mv = kWetMv;
+    if (mv > dry_mv) mv = dry_mv;
+    if (mv < wet_mv) mv = wet_mv;
 
     /* Inverted: high mV = dry = low percent. */
-    const int span = kDryMv - kWetMv;
-    const int percent = (kDryMv - mv) * 100 / span;
+    const int span = dry_mv - wet_mv;
+    const int percent = (dry_mv - mv) * 100 / span;
 
     ESP_LOGD(TAG, "%d mV -> %d%%", mv, percent);
     return nullable<uint8_t>(static_cast<uint8_t>(percent));
