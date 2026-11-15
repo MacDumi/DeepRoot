@@ -5,50 +5,17 @@
 #include <esp_log.h>
 #include <esp_rom_sys.h>
 
+#include "adc_bus.h"
+#include "app_config.h"
+
 namespace battery {
 
 static const char *TAG = "battery";
 
-static constexpr adc_channel_t kBatteryChannel = ADC_CHANNEL_0;  // A0_D0
-static constexpr adc_atten_t kAttenuation = ADC_ATTEN_DB_6;      // ~0-2.2 V
-
-/* Plausibility window per cell, in millivolts.
- *
- * Below 800 mV nothing is connected — a real cell that far down is scrap and
- * the boost converter would have cut out long before.
- *
- * Note the lower bound sits below the 1000 mV "dead" point on purpose:
- * between 800 and 1000 mV the cell is present but flat, and 0% is the useful
- * answer there, not null. */
-static constexpr int kMinPlausibleMv = 800;
-static constexpr int kMaxPlausibleMv = 1800;
-
-/* Light-load resting discharge curve for one AA alkaline cell, descending.
- *
- * Alkaline is far friendlier to voltage-based gauging than lithium: it has
- * no plateau, so the terminal voltage falls steadily from ~1.6 V fresh to
- * the conventional 1.0 V end-of-life and each voltage maps to a reasonably
- * distinct state of charge. The curve is still not a straight line — the
- * first tenth of a volt goes quickly and the last stretch below 1.2 V drops
- * away — hence the interpolated table rather than a linear map.
- */
-struct CurvePoint {
-    int mv;
-    uint8_t percent;
-};
-
-static constexpr CurvePoint kCurve[] = {
-    {1600, 100}, {1530, 90}, {1480, 80}, {1440, 70}, {1400, 60},
-    {1360, 50},  {1320, 40}, {1280, 30}, {1240, 20}, {1190, 10},
-    {1130, 5},   {1000, 0},
-};
+using namespace app_config::battery;
 
 static constexpr size_t kCurvePoints = sizeof(kCurve) / sizeof(kCurve[0]);
-static constexpr int kOversampleCount = 10;
 
-static constexpr uint32_t kSampleIntervalUs = 200;
-
-static adc_oneshot_unit_handle_t s_adc = nullptr;
 static adc_cali_handle_t s_cali = nullptr;
 static bool s_cali_enabled = false;
 
@@ -74,18 +41,8 @@ static uint8_t curve_lookup(int mv)
     return 0;
 }
 
-esp_err_t init(adc_oneshot_unit_handle_t adc)
+esp_err_t init(void)
 {
-    if (adc == nullptr) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    s_adc = adc;
-
-    adc_oneshot_chan_cfg_t chan_cfg = {};
-    chan_cfg.atten = kAttenuation;
-    chan_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(s_adc, kBatteryChannel, &chan_cfg));
-
     adc_cali_curve_fitting_config_t cali_cfg = {};
     cali_cfg.unit_id = ADC_UNIT_1;
     cali_cfg.chan = kBatteryChannel;
@@ -94,9 +51,7 @@ esp_err_t init(adc_oneshot_unit_handle_t adc)
     if (adc_cali_create_scheme_curve_fitting(&cali_cfg, &s_cali) == ESP_OK) {
         s_cali_enabled = true;
     } else {
-        /* Without calibration the raw counts are not millivolts, so every
-         * reading will fail the plausibility check and report null. That is
-         * the intended failure: null beats a fabricated level. */
+        /* Without calibration the raw counts are not millivolts */
         ESP_LOGW(TAG, "ADC calibration unavailable; battery will report unknown");
     }
 
@@ -106,11 +61,17 @@ esp_err_t init(adc_oneshot_unit_handle_t adc)
 
 esp_err_t read_millivolts(int *out_mv)
 {
-    if (s_adc == nullptr || out_mv == nullptr) {
+    if (out_mv == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
     if (!s_cali_enabled) {
         return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    adc_oneshot_unit_handle_t adc = nullptr;
+    esp_err_t err = adc_bus::open(kBatteryChannel, kAttenuation, &adc);
+    if (err != ESP_OK) {
+        return err;
     }
 
     uint32_t sum = 0;
@@ -120,18 +81,18 @@ esp_err_t read_millivolts(int *out_mv)
         }
 
         int raw = 0;
-        esp_err_t err = adc_oneshot_read(s_adc, kBatteryChannel, &raw);
-        /* A short burst is a different measurement, not a noisier one — fail
-         * the reading rather than average whatever arrived. */
+        err = adc_oneshot_read(adc, kBatteryChannel, &raw);
         if (err != ESP_OK) {
-            return err;
+            break;
         }
         sum += static_cast<uint32_t>(raw);
     }
 
-    /* +N/2 rounds to nearest; truncating would bias every reading low by up
-     * to one count, and a systematic offset is exactly what averaging cannot
-     * remove. On this curve a low bias reads as a flatter battery. */
+    adc_bus::close();
+    if (err != ESP_OK) {
+        return err;
+    }
+
     const int raw_mean =
         static_cast<int>((sum + kOversampleCount / 2) / kOversampleCount);
 

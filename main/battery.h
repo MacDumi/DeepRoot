@@ -12,13 +12,11 @@
 
 namespace battery {
 
-/** Configure the battery sense channel.
+/** Set up the battery sense calibration.
  *
- * @param adc  Shared ADC1 oneshot handle — see soil_probe::adc_unit(). The
- *             ESP32-C6 has one usable ADC unit and the oneshot driver permits
- *             a single handle per unit, so this must be borrowed, not created.
- */
-esp_err_t init(adc_oneshot_unit_handle_t adc);
+ * The ADC unit itself is opened per reading through adc_bus, which the soil
+ * probe shares. */
+esp_err_t init(void);
 
 /** Estimate remaining charge.
  *
