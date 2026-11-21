@@ -15,6 +15,8 @@
 #include <lib/support/CodeUtils.h>
 #include <platform/DeviceInstanceInfoProvider.h>
 
+#include "app_config.h"
+
 #if !CONFIG_CUSTOM_DEVICE_INSTANCE_INFO_PROVIDER
 #error "factory_info requires CONFIG_CUSTOM_DEVICE_INSTANCE_INFO_PROVIDER=y"
 #endif
@@ -24,10 +26,7 @@ namespace {
 
 const char *TAG = "factory_info";
 
-constexpr char kVendorName[]   = "DIY";
-constexpr char kProductName[]  = "Soil Sensor";
-constexpr char kHwVerString[]  = "XIAO ESP32-C6";
-constexpr char kSerialPrefix[] = "SOIL-";
+using namespace app_config::factory;
 
 /* Serial number derived from the eFuse MAC, which is burned by Espressif in
  * production and unique per chip.

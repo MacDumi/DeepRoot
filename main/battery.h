@@ -1,5 +1,5 @@
 /*
- * Battery gauge for AA alkaline cells — voltage via ADC, mapped to a
+ * Battery gauge for AA alkaline cells -- voltage via ADC, mapped to a
  * remaining-charge percentage.
  */
 

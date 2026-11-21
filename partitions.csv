@@ -4,7 +4,7 @@
 #   two slots            : 0x1F0000 each      = 2,031,616 B  (1.94 MB)
 #   tail                 : 0x3F0000..0x400000 = 64 KB -> fctry
 #
-# No SPIFFS and no coredump — every byte goes to the app slots.
+# No SPIFFS and no coredump -- every byte goes to the app slots.
 # `fctry` is an NVS partition reserved for Matter factory data
 # (DAC / PAI certificates, discriminator, passcode).
 #

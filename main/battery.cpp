@@ -111,7 +111,7 @@ nullable<uint8_t> read_percent(void)
 
     if (cell_mv < kMinPlausibleMv || cell_mv > kMaxPlausibleMv) {
         ESP_LOGW(TAG, "%d mV/cell outside plausible alkaline range (%d-%d), "
-                      "reporting null — check the sense pin",
+                      "reporting null -- check the sense pin",
                  cell_mv, kMinPlausibleMv, kMaxPlausibleMv);
         return unknown;
     }
