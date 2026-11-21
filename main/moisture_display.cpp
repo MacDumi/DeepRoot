@@ -43,9 +43,9 @@ void show(nullable<uint8_t> percent)
     }
 
     led::color cl = led::color::GREEN;
-    if (percent.value() < kMoistureDryPercent) {
+    if (percent.value() <= app_config::measure::kDryPercent) {
         cl = led::color::RED;
-    } else if (percent.value() < kMoistureWetPercent) {
+    } else if (percent.value() <= app_config::measure::kAlmostDryPercent) {
         cl = led::color::YELLOW;
     }
     ESP_LOGI(TAG, "showing moisture %u%%", percent.value());

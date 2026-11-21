@@ -1,7 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
 
-# Standard ESP-IDF project layout. This same tree builds either with
-# `idf.py` directly or via PlatformIO's `framework = espidf`.
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(matter_soil_sensor)
 
@@ -12,17 +10,35 @@ project(matter_soil_sensor)
 # Under C++20 and later, std::optional's operator== constraint is not
 # satisfied for types whose operator== takes a BASE type (as the closure
 # cluster's GenericOverallCurrentState does), so esp_matter 1.5.x fails
-# to compile with:
-#
-#   Nullable.h:116: no match for 'operator==' (operand types are
-#   'const std::optional<...GenericOverallCurrentState>' and same)
-#
-# Verified: the failure depends on the LANGUAGE STANDARD, not the compiler
-# version — GCC 15 and 16 both compile it at c++17 and both reject it at
-# c++20/c++2b. Using an older GCC does not help.
-#
-# Scoping this to the Matter component only; the rest of the project keeps
-# the IDF default.
+# to compile .
 # ---------------------------------------------------------------------------
 idf_component_get_property(matter_lib espressif__esp_matter COMPONENT_LIB)
 target_compile_options(${matter_lib} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>)
+
+# ---------------------------------------------------------------------------
+# Take the spaces out of OpenThread's build timestamp.
+#
+# Rewriting the timestamp in ISO-8601 basic form removes the spaces, which
+# sends the value down the elif branch that escapes correctly. Same class of
+# PlatformIO/CMake translation gap as tools/pio_embed_binary_data.py, but fixed
+# here rather than there because CMake owns the property: `idf.py` builds take
+# the identical path and are unaffected either way.
+# ---------------------------------------------------------------------------
+if(CONFIG_OPENTHREAD_ENABLED)
+    idf_component_get_property(openthread_lib openthread COMPONENT_LIB)
+    get_target_property(ot_defs ${openthread_lib} COMPILE_DEFINITIONS)
+
+    if(ot_defs)
+        string(TIMESTAMP ot_stamp "%Y-%m-%dT%H:%M:%SZ" UTC)
+        set(ot_defs_fixed "")
+        foreach(ot_def IN LISTS ot_defs)
+            if(ot_def MATCHES "^OPENTHREAD_BUILD_DATETIME=")
+                list(APPEND ot_defs_fixed "OPENTHREAD_BUILD_DATETIME=\"${ot_stamp}\"")
+            else()
+                list(APPEND ot_defs_fixed "${ot_def}")
+            endif()
+        endforeach()
+        set_target_properties(${openthread_lib} PROPERTIES
+                              COMPILE_DEFINITIONS "${ot_defs_fixed}")
+    endif()
+endif()

@@ -13,11 +13,7 @@ but nothing ever generates it, so the build dies with:
     Source `.pio/build/<env>/https_server.crt.S' not found, needed by target
     `.../https_server.crt.S.o'
 
-PlatformIO papers over exactly one instance of this — mbedtls' certificate
-bundle, hardcoded as `x509_crt_bundle.S` in the espressif32 builder — and no
-others.
-
-Building with `idf.py` directly is unaffected — real CMake runs the custom
+Building with `idf.py` directly is unaffected -- real CMake runs the custom
 command. This script only matters for the PlatformIO path.
 
 This script scans component CMakeLists.txt files for target_add_binary_data()
