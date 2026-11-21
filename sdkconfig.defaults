@@ -1,15 +1,37 @@
+# ---------------------------------------------------------------------------
+# Matter over Thread soil sensor -- Seeed XIAO ESP32-C6.
+#
+# 802.15.4 only, commissioned over BLE. Needs a Thread border router on the
+# network.
+# ---------------------------------------------------------------------------
+
 # ---- Target / flash -------------------------------------------------------
 CONFIG_IDF_TARGET="esp32c6"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
-# ---- Matter transport -----------------------------------------------------
-# Wi-Fi + BLE commissioning. Measured at 1,649,152 B, fits the 1.94 MB
-# dual-OTA slot with ~19% headroom. For Thread instead of Wi-Fi see README.
+# ---- Commissioning transport ----------------------------------------------
 CONFIG_ENABLE_CHIPOBLE=y
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
+
+# 0 dBm instead of the +9 dBm default.
+CONFIG_BT_LE_DFT_TX_POWER_LEVEL_N0=y
+
+# ---- RF calibration -------------------------------------------------------
+# Reuse the calibration data stored in NVS instead of re-calibrating on every
+# boot.
+CONFIG_ESP_PHY_RF_CAL_NONE=y
+
+# ---- CHIP configuration overrides -----------------------------------------
+# Header included by CHIPConfig.h ahead of its own defaults, for the
+# CHIP_CONFIG_* values that have no Kconfig symbol. Currently the subscription
+# resumption retry budget -- see the file for why.
+#
+# The path is resolved against the project root by esp_matter's CMakeLists, not
+# against this file. It is a string option: the quotes are part of the value.
+CONFIG_CHIP_PROJECT_CONFIG="main/chip_project_config.h"
 
 # ---- Device identity ------------------------------------------------------
 CONFIG_CUSTOM_DEVICE_INSTANCE_INFO_PROVIDER=y
@@ -18,8 +40,8 @@ CONFIG_ENABLE_OTA_REQUESTOR=y
 
 # ---- Software version ----------------------------------------------------
 CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
-CONFIG_APP_PROJECT_VER="0.3"
-CONFIG_DEVICE_SOFTWARE_VERSION_NUMBER=3
+CONFIG_APP_PROJECT_VER="0.5"
+CONFIG_DEVICE_SOFTWARE_VERSION_NUMBER=5
 
 # ---- Matter crypto --------------------------------------------------------
 CONFIG_MBEDTLS_HKDF_C=y
@@ -28,5 +50,69 @@ CONFIG_MBEDTLS_SSL_PROTO_DTLS=y
 CONFIG_MBEDTLS_ECJPAKE_C=y
 CONFIG_MBEDTLS_KEY_EXCHANGE_ECJPAKE=y
 
+# ---- CPU ------------------------------------------------------------------
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
+
+# 1 ms tick so the idle path can enter light sleep for short windows instead of
+# rounding them away at the 10 ms default.
+CONFIG_FREERTOS_HZ=1000
+
 # ---- Size -----------------------------------------------------------------
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# ---- OpenThread -----------------------------------------------------------
+CONFIG_OPENTHREAD_ENABLED=y
+CONFIG_IEEE802154_ENABLED=y
+
+# Minimal Thread Device: end device only, never routes or becomes leader.
+CONFIG_OPENTHREAD_MTD=y
+CONFIG_OPENTHREAD_BORDER_ROUTER=n
+
+# Thread has no multicast DNS-SD. The node registers its Matter service with
+# the border router's SRP server instead.
+CONFIG_OPENTHREAD_SRP_CLIENT=y
+CONFIG_OPENTHREAD_DNS_CLIENT=y
+CONFIG_USE_MINIMAL_MDNS=n
+
+# ---- Matter transport -----------------------------------------------------
+CONFIG_ENABLE_MATTER_OVER_THREAD=y
+CONFIG_ESP_MATTER_ENABLE_OPENTHREAD=y
+
+# Drops the Wi-Fi station driver and the Wi-Fi Network Commissioning cluster.
+CONFIG_ENABLE_WIFI_STATION=n
+
+# ---- lwIP -----------------------------------------------------------------
+# Thread is IPv6-only and hands the stack more addresses than the lwIP default
+# allows (link-local, mesh-local EID, RLOC, ALOC, plus any OMR prefix).
+# Values match IDF's own openthread examples.
+CONFIG_LWIP_IPV6_NUM_ADDRESSES=8
+CONFIG_LWIP_MULTICAST_PING=y
+CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=4096
+
+# No lwIP neighbour discovery.
+CONFIG_LWIP_ND6=n
+
+# Drop the IPv4 stack outright. Matter is IPv6-only by specification .
+CONFIG_DISABLE_IPV4=y
+CONFIG_LWIP_IPV4=n
+
+# ---- ICD (Intermittently Connected Device) --------------------------------
+# Registers the node as a Sleepy End Device rather than a Minimal End Device.
+CONFIG_ENABLE_ICD_SERVER=y
+
+# Long Idle Time.
+CONFIG_ENABLE_ICD_LIT=y
+
+# ---- Light sleep ----------------------------------------------------------
+CONFIG_PM_ENABLE=y
+
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+
+# Peripheral (TOP) domain stays powered in light sleep. Powering it down is
+# EXPERIMENTAL upstream and incompatible with the button wake.
+CONFIG_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP=n
+# Previously pulled in by the option above;
+CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP=y
+CONFIG_IEEE802154_SLEEP_ENABLE=y
+CONFIG_ESP_SLEEP_POWER_DOWN_FLASH=y
+CONFIG_ESP_PHY_MAC_BB_PD=y
