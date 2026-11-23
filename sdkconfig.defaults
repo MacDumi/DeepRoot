@@ -5,6 +5,11 @@
 # network.
 # ---------------------------------------------------------------------------
 
+# ---- Software version ----------------------------------------------------
+CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
+CONFIG_APP_PROJECT_VER="0.5"
+CONFIG_DEVICE_SOFTWARE_VERSION_NUMBER=6
+
 # ---- Target / flash -------------------------------------------------------
 CONFIG_IDF_TARGET="esp32c6"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
@@ -18,11 +23,6 @@ CONFIG_BT_NIMBLE_ENABLED=y
 
 # 0 dBm instead of the +9 dBm default.
 CONFIG_BT_LE_DFT_TX_POWER_LEVEL_N0=y
-
-# ---- RF calibration -------------------------------------------------------
-# Reuse the calibration data stored in NVS instead of re-calibrating on every
-# boot.
-CONFIG_ESP_PHY_RF_CAL_NONE=y
 
 # ---- CHIP configuration overrides -----------------------------------------
 # Header included by CHIPConfig.h ahead of its own defaults, for the
@@ -38,10 +38,9 @@ CONFIG_CUSTOM_DEVICE_INSTANCE_INFO_PROVIDER=y
 
 CONFIG_ENABLE_OTA_REQUESTOR=y
 
-# ---- Software version ----------------------------------------------------
-CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
-CONFIG_APP_PROJECT_VER="0.5"
-CONFIG_DEVICE_SOFTWARE_VERSION_NUMBER=5
+# A new OTA image boots on trial and the bootloader returns to the previous one
+# unless the app confirms it;
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # ---- Matter crypto --------------------------------------------------------
 CONFIG_MBEDTLS_HKDF_C=y

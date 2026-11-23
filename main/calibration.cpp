@@ -18,6 +18,9 @@ using namespace app_config::calibration;
 
 static std::atomic<bool> s_active{false};
 
+/* Written by start() only while no run is active; read by the run it starts. */
+static saved_cb_t s_on_saved = nullptr;
+
 /* The insert window is the time spent flashing the prompt, so the flash count
  * is derived from it rather than configured separately. */
 static constexpr int kInsertFlashCount =
@@ -80,6 +83,12 @@ static void calibration_task(void *arg)
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "calibration succeeded");
         flash(led::color::GREEN, kResultFlashCount, kResultFlashHalfPeriodMs);
+
+        /* After the flash, so the user's feedback is not held up by the
+         * probe settle time inside the callback. */
+        if (s_on_saved != nullptr) {
+            s_on_saved();
+        }
     } else {
         ESP_LOGW(TAG, "calibration failed; previous calibration kept");
         flash(led::color::RED, kResultFlashCount, kResultFlashHalfPeriodMs);
@@ -89,13 +98,16 @@ static void calibration_task(void *arg)
     vTaskDelete(nullptr);
 }
 
-esp_err_t start(void)
+esp_err_t start(saved_cb_t on_saved)
 {
     bool expected = false;
     if (!s_active.compare_exchange_strong(expected, true)) {
         ESP_LOGW(TAG, "calibration already in progress");
         return ESP_ERR_INVALID_STATE;
     }
+
+    /* Safe to set here: s_active guarantees no run is reading it. */
+    s_on_saved = on_saved;
 
     if (xTaskCreate(calibration_task, "calibration", 3072, nullptr, 4, nullptr) != pdPASS) {
         ESP_LOGE(TAG, "calibration task creation failed");

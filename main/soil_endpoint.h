@@ -39,7 +39,8 @@ constexpr uint32_t kBatReplacementNeededAttributeId = 0x0000000F;
  * Adds Descriptor, Identify, SoilMeasurement and PowerSource (server)
  * clusters.
  *
- * The attributes start at the given readings rather than null.
+ * The attributes start at the given readings rather than null. A null battery
+ * reading starts BatChargeLevel at Warning, since the enum has no unknown.
  *
  * @param node      the Matter node to attach to
  * @param moisture  initial moisture, 0-100, or null for unknown

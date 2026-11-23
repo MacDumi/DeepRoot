@@ -16,11 +16,17 @@
 
 namespace calibration {
 
+/** Called on the calibration task once a new calibration has been saved. Not
+ * called when the run fails or is rejected, since nothing has changed then. */
+using saved_cb_t = void (*)(void);
+
 /** Start a calibration run in its own task and return immediately.
  *
+ * @param on_saved  optional; run after a successful save, while active() is
+ *                  still true
  * @return ESP_ERR_INVALID_STATE if a run is already in progress.
  */
-esp_err_t start(void);
+esp_err_t start(saved_cb_t on_saved);
 
 /** True while a calibration run owns the LEDs. */
 bool active(void);

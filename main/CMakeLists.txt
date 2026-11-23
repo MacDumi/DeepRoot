@@ -3,10 +3,10 @@ idf_component_register(
          "battery.cpp" "led.cpp" "calibration.cpp" "ble_gate.cpp"
          "adc_bus.cpp" "antenna.cpp" "button.cpp" "commissioning.cpp"
          "icd_support.cpp" "matter_node.cpp" "measurement.cpp"
-         "moisture_display.cpp"
+         "moisture_display.cpp" "identify_indicator.cpp" "ota_rollback.cpp"
     INCLUDE_DIRS "."
     PRIV_REQUIRES esp_adc esp_driver_gpio esp_driver_ledc nvs_flash esp_pm bt
-                 ieee802154
+                 ieee802154 app_update
 )
 
 # Keep the BLE controller off on a commissioned boot. See ble_gate.h.

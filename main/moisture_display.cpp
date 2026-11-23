@@ -6,6 +6,7 @@
 
 #include "app_config.h"
 #include "calibration.h"
+#include "identify_indicator.h"
 #include "led.h"
 
 namespace moisture_display {
@@ -18,8 +19,9 @@ static TimerHandle_t s_led_off_timer = nullptr;
 
 static void led_off_timer_cb(TimerHandle_t timer)
 {
-    /* A calibration started while the display was up owns the LEDs now. */
-    if (!calibration::active()) {
+    /* A calibration or identify started while the display was up owns the
+     * LEDs now. */
+    if (!calibration::active() && !identify_indicator::active()) {
         led::set_color(led::color::OFF);
     }
 }
@@ -34,6 +36,14 @@ esp_err_t init(void)
 void show(nullable<uint8_t> percent)
 {
     if (calibration::active() || s_led_off_timer == nullptr) {
+        return;
+    }
+
+    /* Identify outranks the display: it is a controller asking which device
+     * this is, and a solid colour on top of it would muddle the answer. The
+     * reading has still been published. */
+    if (identify_indicator::active()) {
+        ESP_LOGI(TAG, "identifying; moisture not shown");
         return;
     }
 

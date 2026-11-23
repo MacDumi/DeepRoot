@@ -30,6 +30,7 @@
 #include "button.h"
 #include "calibration.h"
 #include "icd_support.h"
+#include "identify_indicator.h"
 #include "led.h"
 #include "matter_node.h"
 #include "measurement.h"
@@ -64,6 +65,11 @@ static void configure_power_management(void)
 #endif
 }
 
+static void on_calibration_saved(void)
+{
+    measurement::update_moisture();
+}
+
 /* Runs on the button task. */
 static void on_button_gesture(button::gesture g)
 {
@@ -80,7 +86,7 @@ static void on_button_gesture(button::gesture g)
 
     case button::gesture::MULTI_PRESS:
         ESP_LOGI(TAG, "probe calibration requested");
-        calibration::start();
+        calibration::start(on_calibration_saved);
         break;
 
     case button::gesture::LONG_HOLD: {
@@ -127,6 +133,7 @@ extern "C" void app_main(void)
 
     ESP_ERROR_CHECK(led::init());
     ESP_ERROR_CHECK(moisture_display::init());
+    ESP_ERROR_CHECK(identify_indicator::init());
 
     /* First reading, taken here because no radio is up yet. */
     nullable<uint8_t> boot_moisture = soil_probe::read_percent();

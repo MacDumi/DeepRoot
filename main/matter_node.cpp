@@ -1,10 +1,16 @@
 #include "matter_node.h"
 
+#include <cinttypes>
+
 #include <esp_event.h>
 #include <esp_ieee802154.h>
 #include <esp_log.h>
 
+#include <esp_openthread.h>
+#include <esp_openthread_lock.h>
 #include <esp_openthread_types.h>
+#include <openthread/child_supervision.h>
+#include <openthread/thread.h>
 #include <platform/ESP32/OpenthreadLauncher.h>
 
 #include "app_config.h"
@@ -12,6 +18,8 @@
 #include "commissioning.h"
 #include "factory_info.h"
 #include "icd_support.h"
+#include "identify_indicator.h"
+#include "ota_rollback.h"
 #include "soil_endpoint.h"
 
 using namespace esp_matter;
@@ -25,9 +33,20 @@ static uint16_t s_soil_endpoint_id = 0;
 static esp_err_t identification_cb(identification::callback_type_t type, uint16_t endpoint_id,
                                    uint8_t effect_id, uint8_t effect_variant, void *priv_data)
 {
-    ESP_LOGI(TAG, "identify: type %u endpoint %u", type, endpoint_id);
-    /* TODO: blink the on-board LED so a user can tell which sensor a
-     * controller is talking to. */
+    /* Runs on the Matter task; identify_indicator hands the LED work to the
+     * timer task. Only the soil endpoint has an Identify cluster. */
+    switch (type) {
+    case identification::START:
+        identify_indicator::start();
+        break;
+    case identification::STOP:
+        identify_indicator::stop();
+        break;
+    case identification::EFFECT:
+        /* Never delivered: the optional TriggerEffect command is not created
+         * on the endpoint. */
+        break;
+    }
     return ESP_OK;
 }
 
@@ -82,7 +101,27 @@ static esp_err_t openthread_platform_init(void)
     return set_openthread_platform_config(&config);
 }
 
-/* Lower the 802.15.4 TX power before Thread sends its first frame.
+/* Child-role parameters the parent learns at attach. Not persisted by
+ * OpenThread, so they are set again on every boot. */
+static void configure_child(void)
+{
+    using namespace app_config::icd;
+
+    esp_openthread_lock_acquire(portMAX_DELAY);
+    otInstance *instance = esp_openthread_get_instance();
+    otThreadSetChildTimeout(instance, kThreadChildTimeoutSec);
+    otChildSupervisionSetInterval(instance, kThreadSupervisionIntervalSec);
+    otChildSupervisionSetCheckTimeout(instance, kThreadSupervisionCheckTimeoutSec);
+    /* Read back: OpenThread clamps rather than rejecting. */
+    const uint32_t timeout = otThreadGetChildTimeout(instance);
+    esp_openthread_lock_release();
+
+    ESP_LOGI(TAG, "child timeout %" PRIu32 " s; supervision interval %u s, check timeout %u s",
+             timeout, kThreadSupervisionIntervalSec, kThreadSupervisionCheckTimeoutSec);
+}
+
+/* Configure the radio and Thread before Thread sends its first frame:
+ * TX power, child timeout and child supervision.
  *
  * OPENTHREAD_EVENT_START is posted once the radio is enabled and before
  * StartThreadTask() launches the ot_task, so nothing has gone on air yet. The
@@ -92,9 +131,11 @@ static void on_openthread_start(void *arg, esp_event_base_t base, int32_t id, vo
 {
     esp_ieee802154_set_txpower(app_config::radio::kThreadTxPowerDbm);
     ESP_LOGI(TAG, "802.15.4 TX power set to %d dBm", esp_ieee802154_get_txpower());
+
+    configure_child();
 }
 
-static esp_err_t register_tx_power_handler(void)
+static esp_err_t register_openthread_start_handler(void)
 {
     /* esp_matter::start() creates the default loop too, and accepts it already
      * existing. */
@@ -147,9 +188,9 @@ esp_err_t start(void)
     }
 
     /* Before start(), which enables the radio. See on_openthread_start(). */
-    err = register_tx_power_handler();
+    err = register_openthread_start_handler();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "TX power handler registration failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "OpenThread start handler registration failed: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -165,6 +206,7 @@ esp_err_t start(void)
     ble_gate::release_memory();
     commissioning::start();
     icd_support::start();
+    ota_rollback::start();
     return ESP_OK;
 }
 

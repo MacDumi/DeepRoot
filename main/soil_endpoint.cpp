@@ -7,6 +7,7 @@
 
 #include <app/AttributeAccessInterface.h>
 #include <app/AttributeAccessInterfaceRegistry.h>
+#include <clusters/Identify/Enums.h>
 #include <clusters/SoilMeasurement/Attributes.h>
 #include <clusters/SoilMeasurement/Metadata.h>
 
@@ -103,6 +104,10 @@ esp_err_t create(node_t *node, nullable<uint8_t> moisture, nullable<uint8_t> bat
     /* Identify lets a controller ask the device to make itself known.
      * Required by the spec for most device types and cheap to include. */
     identify::config_t identify_config;
+    /* Tells a controller what identifying looks like. The default, None,
+     * says nothing visible happens. See identify_indicator.h. */
+    identify_config.identify_type =
+        chip::to_underlying(chip::app::Clusters::Identify::IdentifyTypeEnum::kVisibleIndicator);
     if (identify::create(endpoint, &identify_config, CLUSTER_FLAG_SERVER) == nullptr) {
         ESP_LOGE(TAG, "identify cluster create failed");
         return ESP_FAIL;
@@ -153,12 +158,12 @@ esp_err_t create(node_t *node, nullable<uint8_t> moisture, nullable<uint8_t> bat
     power_config.power_source.features.battery.bat_replaceability =
         chip::to_underlying(PowerSourceNs::BatReplaceabilityEnum::kUserReplaceable);
 
-    if (!battery.is_null()) {
-        const PowerSourceNs::BatChargeLevelEnum level = charge_level(battery.value());
-        power_config.power_source.features.battery.bat_charge_level = chip::to_underlying(level);
-        power_config.power_source.features.battery.bat_replacement_needed =
-            level == PowerSourceNs::BatChargeLevelEnum::kCritical;
-    }
+    const PowerSourceNs::BatChargeLevelEnum level =
+        battery.is_null() ? PowerSourceNs::BatChargeLevelEnum::kWarning
+                          : charge_level(battery.value());
+    power_config.power_source.features.battery.bat_charge_level = chip::to_underlying(level);
+    power_config.power_source.features.battery.bat_replacement_needed =
+        level == PowerSourceNs::BatChargeLevelEnum::kCritical;
 
     /* Creates the three attributes the Battery feature makes mandatory:
      * BatChargeLevel, BatReplacementNeeded and BatReplaceability.

@@ -15,7 +15,8 @@ esp_err_t init(void);
 
 /** Light the LED for the given reading for kMoistureDisplayMs.
  *
- * Does nothing for a null reading, or while a calibration run owns the LEDs. */
+ * Does nothing for a null reading, or while a calibration run or Matter
+ * Identify owns the LEDs. */
 void show(nullable<uint8_t> percent);
 
 }  // namespace moisture_display

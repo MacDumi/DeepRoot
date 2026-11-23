@@ -42,7 +42,7 @@ inline constexpr gpio_num_t kRfSwitchEnableGpio = GPIO_NUM_3;
 namespace radio {
 
 /* 802.15.4 transmit power, in dBm. */
-inline constexpr int8_t kThreadTxPowerDbm = 3;
+inline constexpr int8_t kThreadTxPowerDbm = 8;
 
 }  // namespace radio
 
@@ -112,12 +112,30 @@ namespace icd {
  * ------------------------------------------------------------------- */
 
 /* Radio wake rate in idle mode: how often the node polls its Thread parent for
- * buffered traffic. This is the number that decides the power budget. Must stay
- * under the parent's child timeout (OpenThread default 240 s, and
- * OPENTHREAD_CONFIG_MLE_CHILD_TIMEOUT_DEFAULT is not overridden here) or the
+ * buffered traffic. Must stay well under kThreadChildTimeoutSec below, or the
  * parent drops the device between polls.
+ *
+ * Only applies once a controller has registered as a LIT client. Until then
+ * CHIP runs the node as SIT and caps this at 15 s
+ * (ICDConfigurationData::GetSlowPollingInterval()).
  */
 inline constexpr uint32_t kIcdSlowPollMs = 120 * 1000;
+
+/* Thread child timeout: how long the parent keeps this child in its table
+ * without hearing from it. The child picks the value and sends it to the parent
+ * at attach. The OpenThread default (240 s) is only two slow polls, so one lost
+ * poll plus jitter cost a full re-attach, which is far dearer than polling.
+ *
+ * Raising it does not change the poll rate. OpenThread polls at the shorter of
+ * a timeout-derived period and the period CHIP sets (DataPollSender::
+ * CalculatePollPeriod()). The cost is that the parent holds a slot, and buffers
+ * frames, for a dead child that much longer. */
+inline constexpr uint32_t kThreadChildTimeoutPolls = 5;
+inline constexpr uint32_t kThreadChildTimeoutSec = kThreadChildTimeoutPolls * kIcdSlowPollMs / 1000;
+
+static_assert(kThreadChildTimeoutPolls >= 3, "child timeout must tolerate at least two lost polls");
+static_assert(kThreadChildTimeoutSec <= 8 * 60 * 60,
+              "OpenThread clamps the child timeout to 8 h (Mle::SetTimeout())");
 
 /* Poll rate once something is happening. Left at the CHIP default */
 inline constexpr uint32_t kIcdFastPollMs = 200;
@@ -135,6 +153,28 @@ inline constexpr uint32_t kIcdActiveModeMs = 5 * 1000;
  * esp_matter's set_active_threshold() rejects anything lower once the mode is
  * LIT. */
 inline constexpr uint32_t kIcdActiveThresholdMs = 5000;
+
+/* Thread child supervision.
+ *
+ * The child asks its parent for this supervision interval: whenever the parent
+ * has sent the child nothing for this long, it queues an empty keep-alive
+ * frame. A sleepy child only collects that frame on its next poll, so it can
+ * arrive up to interval + slow poll after the parent's last frame. Pinned to
+ * the OpenThread default so the timeout below stays consistent with it. */
+inline constexpr uint16_t kThreadSupervisionIntervalSec = 129;
+
+/* If the child hears nothing from its parent for this long, it sends an MLE
+ * Child Update Request to confirm the parent still holds it in its table. The
+ * OpenThread default (190 s) is shorter than interval + slow poll (249 s), so
+ * it fired on every cycle and added a request/response exchange every 190 s.
+ * The margin covers poll jitter and one lost keep-alive. */
+inline constexpr uint16_t kThreadSupervisionMarginSec = 30;
+inline constexpr uint16_t kThreadSupervisionCheckTimeoutSec =
+    kThreadSupervisionIntervalSec + kIcdSlowPollMs / 1000 + kThreadSupervisionMarginSec;
+
+static_assert(kThreadSupervisionCheckTimeoutSec * 1000ULL >
+                  kThreadSupervisionIntervalSec * 1000ULL + kIcdSlowPollMs,
+              "supervision check timeout must exceed interval + slow poll");
 
 }  // namespace icd
 
@@ -165,6 +205,14 @@ namespace display {
  * by the measurement tier (measure::kDryPercent, measure::kAlmostDryPercent):
  * red when dry, yellow when almost dry, green otherwise. */
 inline constexpr int kMoistureDisplayMs = 1000;
+
+/* Matter Identify: red -> yellow -> green -> off, one step each, so a full
+ * cycle is 4 x kIdentifyStepMs.
+ *
+ * kIdentifyMaxMs caps how long the LED runs whatever IdentifyTime a controller
+ * asks for (up to 65535 s): a lit LED blocks light sleep. */
+inline constexpr int kIdentifyStepMs = 200;
+inline constexpr int kIdentifyMaxMs = 30 * 1000;
 
 }  // namespace display
 
@@ -281,6 +329,21 @@ inline constexpr uint8_t kBatteryWarningPercent = 35;
 inline constexpr uint8_t kBatteryCriticalPercent = 20;
 
 }  // namespace battery
+
+namespace ota {
+
+/* Trial of a freshly installed OTA image.
+ *
+ * kHealthyAttachedSec: continuous Thread attachment needed to confirm it.
+ * kTrialTimeoutSec: if that has not happened by then, roll back.
+ * kCheckIntervalSec: how often to look. Only runs during the trial. */
+inline constexpr uint32_t kHealthyAttachedSec = 60;
+inline constexpr uint32_t kTrialTimeoutSec = 15 * 60;
+inline constexpr uint32_t kCheckIntervalSec = 10;
+
+static_assert(kHealthyAttachedSec < kTrialTimeoutSec, "trial must allow time to confirm");
+
+}  // namespace ota
 
 namespace factory {
 
