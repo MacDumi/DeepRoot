@@ -9,3 +9,6 @@ sdkconfig
 sdkconfig.*
 !sdkconfig.defaults
 !sdkconfig.defaults.*
+
+# Firmware images produced by `make package` / `make full`.
+dist/
