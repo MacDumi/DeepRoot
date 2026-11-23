@@ -118,3 +118,4 @@ package:
 
 clean:
 	rm -rf "$(DIST)"
+	rm -f sdkconfig.xiao_soil_sensor
