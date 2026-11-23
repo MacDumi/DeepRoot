@@ -1,4 +1,4 @@
-# Matter-over-Thread firmware for the Seeed XIAO Soil Moisture Sensor
+# DeepRoot
 
 [![Latest release](https://img.shields.io/github/v/release/MacDumi/DeepRoot?label=release)](https://github.com/MacDumi/DeepRoot/releases/latest)
 
